@@ -1,0 +1,8 @@
+C:\RedTeam\SharpBlackOut\SharpBlackOut\bin\Debug\SharpBlackOut.exe.config
+C:\RedTeam\SharpBlackOut\SharpBlackOut\bin\Debug\SharpBlackOut.exe
+C:\RedTeam\SharpBlackOut\SharpBlackOut\bin\Debug\SharpBlackOut.pdb
+C:\RedTeam\SharpBlackOut\SharpBlackOut\obj\Debug\SharpBlackOut.csproj.AssemblyReference.cache
+C:\RedTeam\SharpBlackOut\SharpBlackOut\obj\Debug\SharpBlackOut.csproj.SuggestedBindingRedirects.cache
+C:\RedTeam\SharpBlackOut\SharpBlackOut\obj\Debug\SharpBlackOut.csproj.CoreCompileInputs.cache
+C:\RedTeam\SharpBlackOut\SharpBlackOut\obj\Debug\SharpBlackOut.exe
+C:\RedTeam\SharpBlackOut\SharpBlackOut\obj\Debug\SharpBlackOut.pdb
